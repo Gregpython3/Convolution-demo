@@ -6,7 +6,7 @@ title: Convolution, in plain geology
 Welcome! Read the blog post below, or jump straight to the
 [interactive demo](/Convolution-demo/interactive/).
 
-- [Blog: Learn first, krige second](/Convolution-demo/2025/10/31/convolution-plain-geology.html)
+- 
 I’m Greg, a geologist who likes turning tricky ideas into plain English. Today I want to explain convolution using a term miners already know: the search neighbourhood.
 Start with a map in your head. It could be EM conductivity, hyperspectral, elevation—anything that varies across the ground. Now imagine placing your usual search neighbourhood on that map, the same way you do when estimating grades around a block. Wherever that neighbourhood sits, you look at the values inside it and blend them into one sensible number for the spot in the middle. Then you slide the neighbourhood across the map and repeat. That sliding, blending step is all convolution means.
 Why bother? Because data and decisions live at different scales. Drill assays are tiny intervals along a hole. Rasters come as fine pixels. But mine plans run on blocks or SMUs. Convolution lets us turn those point- and pixel-level readings into block-level values before we build models or compare to production. If your SMU is 12.5 × 12.5 × 5 m, you use a neighbourhood that represents that block (or a tidy approximation of it) and average the information inside. Do this for EM, hyperspectral indices, distance-to-contact grids—anything you want as input—and everything now speaks the same block language as your output.

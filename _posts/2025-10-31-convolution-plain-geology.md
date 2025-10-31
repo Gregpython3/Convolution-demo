@@ -9,4 +9,4 @@ I’m Greg, a geologist who enjoys sharing what I’ve learned… (paste your bl
 **Interactive demo:**  
 [Open the live map](/Convolution-demo/interactive/)
 
-![Animated demo](/Convolution-demo/assets/convolution_search_neighbourhood.gif)
+

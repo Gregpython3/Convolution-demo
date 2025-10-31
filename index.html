@@ -1,0 +1,469 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Convolution with a Search Neighbourhood (Geostats + ML)</title>
+<style>
+  :root{--bg:#0b1320;--panel:#111827;--ink:#e5e7eb;--muted:#9ca3af;--accent:#22c55e;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Inter,Arial,sans-serif;background:var(--bg);color:var(--ink);line-height:1.45}
+  header{padding:18px 18px 8px;border-bottom:1px solid #1f2937;background:linear-gradient(180deg,#0b1320,#0b1320 40%,#0e172a)}
+  h1{font-size:clamp(20px,3vw,28px);margin:0 0 6px}
+  header p{margin:0;color:var(--muted)}
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px;align-items:start}
+  .card{background:var(--panel);border:1px solid #1f2937;border-radius:14px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+  .controls{display:grid;gap:10px;margin-top:8px}
+  label{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:13px}
+  input[type=range]{width:60%}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  button{background:#0ea5e9;border:none;color:white;padding:8px 12px;border-radius:10px;cursor:pointer}
+  button.secondary{background:#374151}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  canvas{width:100%;height:auto;border-radius:10px;border:1px solid #1f2937;background:#0b1020}
+  .legend{font-size:12px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:8px}
+  .key{display:flex;align-items:center;gap:6px}
+  .swatch{width:18px;height:12px;border-radius:4px;border:2px solid #ffffff;background:rgba(255,255,255,0.15)}
+  .swatch.red{border-color:#ff3b3b;background:transparent}
+  .swatch.center{border:1px solid #000;background:transparent;width:12px;height:12px}
+  .pill{display:inline-block;padding:3px 8px;border-radius:999px;border:1px solid #1f2937;background:#0f1b2e;color:#a5b4fc;margin-right:6px}
+  .kpi{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+  .kpi div{background:#0e1a2b;border:1px solid #1f2937;border-radius:10px;padding:8px}
+  .footnote{font-size:12px;color:var(--muted)}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+  .colorbar-wrap{display:flex;align-items:center;gap:10px;margin-top:10px}
+  .colorbar-box{display:flex;align-items:center;gap:8px}
+  .colorbar{width:18px;height:160px;border-radius:6px;border:1px solid #1f2937;background:#0b1020}
+  .ticks{display:flex;flex-direction:column;justify-content:space-between;height:160px;font-size:11px;color:var(--muted)}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px}
+  .caption{font-size:12px;color:var(--muted);margin-top:6px}
+  @media (max-width: 1120px){ .wrap{grid-template-columns:1fr} .grid3{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Convolution with a <span class="pill">search neighbourhood</span> — explained for geologists</h1>
+  <p>Slide a neighbourhood across a map, average what's inside, assign the result to the centre cell. That's convolution.<br/>
+  Use it to get block-support inputs for machine learning, then add kriged residuals for spatial continuity.</p>
+</header>
+
+<div class="wrap">
+  <section class="card">
+    <h3 style="margin-top:6px;margin-bottom:10px">Interactive map</h3>
+    <div class="grid3">
+      <div>
+        <canvas id="view" width="540" height="540"></canvas>
+        <div class="caption">Base field with overlays (move mouse or auto-scan)</div>
+      </div>
+      <div>
+        <canvas id="mapNeighbour" width="540" height="540"></canvas>
+        <div class="caption">Map coloured by <strong>neighbourhood mean</strong> (block support)</div>
+      </div>
+      <div>
+        <canvas id="mapHalo" width="540" height="540"></canvas>
+        <div class="caption">Map coloured by <strong>halo mean</strong> (context support)</div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="key"><span class="swatch"></span> <span>Search neighbourhood (block-sized)</span></div>
+      <div class="key"><span class="swatch red"></span> <span>Halo (context window) — solid red line</span></div>
+      <div class="key"><span class="swatch center"></span> <span>Centre cell where the mean is assigned</span></div>
+    </div>
+    <div class="colorbar-wrap">
+      <div class="colorbar-box">
+        <canvas id="colorbar" class="colorbar" width="18" height="160"></canvas>
+        <div class="ticks">
+          <span>1.00</span>
+          <span>0.75</span>
+          <span>0.50</span>
+          <span>0.25</span>
+          <span>0.00</span>
+        </div>
+      </div>
+      <div class="footnote">Colour legend for all three maps (normalized 0 → 1). Higher values are lighter/yellower; lower values are darker/purplish.</div>
+    </div>
+
+    <div class="controls">
+      <div class="row">
+        <button id="autoBtn">▶ Auto-scan</button>
+        <button id="resetBtn" class="secondary">Reset</button>
+        <button id="shapeBtn" class="secondary">Shape: Square</button>
+        <button id="noiseBtn" class="secondary">Shuffle seed</button>
+      </div>
+      <label>Grid size <span><input id="gridSize" type="range" min="16" max="64" value="36"> <span class="mono" id="gridSizeVal">36</span></span></label>
+      <label>Neighbourhood (cells) <span><input id="win" type="range" min="3" max="15" value="7" step="2"> <span class="mono" id="winVal">7</span></span></label>
+      <label>Anisotropy ratio (along/across) <span><input id="anis" type="range" min="1" max="5" value="1" step="0.1"> <span class="mono" id="anisVal">1.0</span></span></label>
+      <label>Anisotropy angle (°) <span><input id="angle" type="range" min="0" max="180" value="0"> <span class="mono" id="angleVal">0°</span></span></label>
+      <label>Halo neighbourhood (larger context) <span><input id="halo" type="range" min="0" max="10" value="3"> <span class="mono" id="haloVal">+3</span></span></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3 style="margin-top:6px;margin-bottom:8px">What you're seeing</h3>
+    <p>
+      The coloured grid is a simple synthetic surface (think EM or an alteration index). 
+      The white outline is your <strong>search neighbourhood</strong>. Wherever it sits, we average values inside it. 
+      That average becomes the estimate for the centre. When you sweep the neighbourhood over the whole grid, you get a block-support map.
+    </p>
+    <div class="kpi">
+      <div><strong>Neighbourhood mean (at cursor)</strong><div class="mono" id="avgVal">—</div></div>
+      <div><strong>Halo mean (at cursor)</strong><div class="mono" id="haloValNum">—</div></div>
+    </div>
+    <p style="margin-top:10px">
+      The two extra windows show the entire grid coloured by the neighbourhood mean (block support) and the halo mean (context). 
+      Comparing them helps you see how values change with support and context.
+    </p>
+
+    <h3 style="margin-top:14px">Where this fits in the workflow</h3>
+    <p>
+      First, use the neighbourhood to turn point and pixel data into values that belong to each block. 
+      Then train a machine learning model at that same support to learn the complex, multi-sensor trend. 
+      Finally, compute residuals (observed minus ML prediction), fit a variogram on those residuals, and krige them back to blocks. 
+      Add the kriged residuals to the ML surface. <em>Learn first, krige second.</em>
+    </p>
+
+    <h3 style="margin-top:14px">Notes</h3>
+    <p class="footnote">
+      Keep layers in the same CRS; normalize neighbourhood weights so an average stays an average; recompute neighbourhood-based features inside each validation fold to avoid leakage.
+    </p>
+  </section>
+</div>
+
+<script>
+function lerp(a,b,t){return a+(b-a)*t}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function viridis(t){
+  const c = [
+    [68,1,84],[72,35,116],[64,67,135],[52,94,141],[41,120,142],[32,144,140],
+    [34,167,132],[68,190,112],[121,209,81],[189,223,38]
+  ];
+  const p = t*(c.length-1);
+  const i = Math.floor(p);
+  const f = p - i;
+  const a=c[i], b=c[Math.min(i+1,c.length-1)];
+  const r=Math.round(lerp(a[0],b[0],f)), g=Math.round(lerp(a[1],b[1],f)), bl=Math.round(lerp(a[2],b[2],f));
+  return `rgb(${r},${g},${bl})`;
+}
+function makeField(n, seed=1){
+  const rng = mulberry32(seed);
+  const arr = new Float32Array(n*n);
+  for(let i=0;i<arr.length;i++) arr[i]=rng();
+  const tmp = new Float32Array(arr);
+  const k = Math.max(2, Math.floor(n*0.04));
+  for(let pass=0; pass<2; pass++){
+    boxBlur(arr,tmp,n,k); boxBlur(tmp,arr,n,k);
+  }
+  const cx = rng()*n*0.6 + n*0.2, cy = rng()*n*0.6 + n*0.2;
+  for(let y=0;y<n;y++){
+    for(let x=0;x<n;x++){
+      const dx=(x-cx)/n, dy=(y-cy)/n;
+      arr[y*n+x]+= Math.exp(-(dx*dx+dy*dy)/(2*0.05));
+    }
+  }
+  normalize(arr);
+  return arr;
+}
+function normalize(arr){
+  let mn=Infinity,mx=-Infinity;
+  for(const v of arr){ if(v<mn) mn=v; if(v>mx) mx=v; }
+  const d = mx-mn || 1;
+  for(let i=0;i<arr.length;i++) arr[i]=(arr[i]-mn)/d;
+}
+function boxBlur(src,dst,n,k){
+  for(let y=0;y<n;y++){
+    let sum=0;
+    for(let x=-k;x<=k;x++) sum+=src[y*n+clamp(x,0,n-1)];
+    for(let x=0;x<n;x++){
+      dst[y*n+x]=sum/(2*k+1);
+      const x0 = clamp(x-k,0,n-1), x1 = clamp(x+k+1,0,n-1);
+      sum += src[y*n+x1]-src[y*n+x0];
+    }
+  }
+  for(let x=0;x<n;x++){
+    let sum=0;
+    for(let y=-k;y<=k;y++) sum+=dst[clamp(y,0,n-1)*n+x];
+    for(let y=0;y<n;y++){
+      src[y*n+x]=sum/(2*k+1);
+      const y0 = clamp(y-k,0,n-1), y1 = clamp(y+k+1,0,n-1);
+      sum += dst[y1*n+x]-dst[y0*n+x];
+    }
+  }
+}
+function mulberry32(a){return function(){var t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return ((t^t>>>14)>>>0)/4294967296}}
+function inEllipse(dx,dy,a,b,theta){
+  const ct=Math.cos(theta), st=Math.sin(theta);
+  const xr= dx*ct + dy*st;
+  const yr=-dx*st + dy*ct;
+  return (xr*xr)/(a*a) + (yr*yr)/(b*b) <= 1;
+}
+
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+const mapN = document.getElementById('mapNeighbour').getContext('2d');
+const mapH = document.getElementById('mapHalo').getContext('2d');
+const cb = document.getElementById('colorbar');
+const cbctx = cb.getContext('2d');
+
+let n = parseInt(document.getElementById('gridSize').value);
+let seed = 1;
+let field = makeField(n, seed);
+
+let win = parseInt(document.getElementById('win').value);
+let halo = parseInt(document.getElementById('halo').value);
+let anis = parseFloat(document.getElementById('anis').value);
+let angle = parseFloat(document.getElementById('angle').value) * Math.PI/180;
+let squareShape = true;
+let mouse = {x: Math.floor(n/2), y: Math.floor(n/2)};
+let auto = false;
+let autoIndex = 0;
+let path = [];
+
+let mapNeighbourData = null;
+let mapHaloData = null;
+
+function makePath(){
+  path.length = 0;
+  const step = Math.max(1, Math.floor(win/2));
+  for(let y=0; y<=n-win; y+=step){
+    const cols = [];
+    for(let x=0; x<=n-win; x+=step) cols.push(x);
+    if(Math.floor(y/step)%2===1) cols.reverse();
+    for(const x of cols) path.push([x + Math.floor(win/2), y + Math.floor(win/2)]);
+  }
+}
+makePath();
+
+function drawColorbar(){
+  const w = cb.width, h = cb.height;
+  const img = cbctx.createImageData(w, h);
+  for(let y=0;y<h;y++){
+    const t = 1 - y/(h-1);
+    const col = viridis(t);
+    const m = col.match(/rgb\((\d+),(\d+),(\d+)\)/);
+    const r = parseInt(m[1]), g = parseInt(m[2]), b = parseInt(m[3]);
+    for(let x=0;x<w;x++){
+      const idx = (y*w + x)*4;
+      img.data[idx+0] = r; img.data[idx+1] = g; img.data[idx+2] = b; img.data[idx+3] = 255;
+    }
+  }
+  cbctx.putImageData(img, 0, 0);
+  cbctx.strokeStyle = "#1f2937";
+  cbctx.strokeRect(0.5, 0.5, w-1, h-1);
+}
+
+function drawBase(){
+  const w = canvas.width, h=canvas.height;
+  const cell = Math.floor(Math.min(w,h)/n);
+  for(let y=0;y<n;y++){
+    for(let x=0;x<n;x++){
+      const v = field[y*n+x];
+      ctx.fillStyle = viridis(v);
+      ctx.fillRect(x*cell, h-(y+1)*cell, cell, cell);
+    }
+  }
+  ctx.strokeStyle = "rgba(255,255,255,0.05)";
+  ctx.lineWidth = 1;
+  for(let i=0;i<=n;i++){
+    ctx.beginPath(); ctx.moveTo(0, i*cell); ctx.lineTo(n*cell, i*cell); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i*cell, 0); ctx.lineTo(i*cell, n*cell); ctx.stroke();
+  }
+
+  const res = neighbourhoodMean(mouse.x, mouse.y, win, anis, angle, squareShape);
+  const mean = res.mean;
+  const meanHalo = halo>0 ? neighbourhoodMean(mouse.x, mouse.y, win+halo, anis, angle, squareShape).mean : NaN;
+
+  ctx.save();
+  ctx.translate(mouse.x*cell+cell/2, h-(mouse.y*cell+cell/2));
+  ctx.rotate(-angle);
+
+  if(halo>0){
+    ctx.globalAlpha = 1.0;
+    ctx.strokeStyle = "#ff3b3b";
+    ctx.lineWidth = 2;
+    const ah = (squareShape? win+halo : (win+halo)*anis) * cell;
+    const bh = (squareShape? win+halo : (win+halo)/anis) * cell;
+    if(squareShape){
+      ctx.strokeRect(-ah/2, -ah/2, ah, ah);
+    }else{
+      ctx.beginPath(); ctx.ellipse(0,0,ah/2,bh/2,0,0,Math.PI*2); ctx.stroke();
+    }
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "white";
+  ctx.lineWidth = 2;
+  const a = (squareShape? win : win*anis) * cell;
+  const b = (squareShape? win : win/anis) * cell;
+  if(squareShape){
+    ctx.strokeRect(-a/2, -a/2, a, a);
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = "white";
+    ctx.fillRect(-a/2, -a/2, a, a);
+  }else{
+    ctx.beginPath();
+    ctx.ellipse(0,0,a/2,b/2,0,0,Math.PI*2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = "white";
+    ctx.beginPath();
+    ctx.ellipse(0,0,a/2,b/2,0,0,Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  document.getElementById('avgVal').textContent = Number.isFinite(mean) ? mean.toFixed(3) : "—";
+  document.getElementById('haloValNum').textContent = Number.isFinite(meanHalo) ? meanHalo.toFixed(3) : "—";
+}
+
+function drawMap(ctx2d, array){
+  const w = ctx2d.canvas.width, h = ctx2d.canvas.height;
+  const cell = Math.floor(Math.min(w,h)/n);
+  for(let y=0;y<n;y++){
+    for(let x=0;x<n;x++){
+      const v = array[y*n+x];
+      ctx2d.fillStyle = viridis(v);
+      ctx2d.fillRect(x*cell, h-(y+1)*cell, cell, cell);
+    }
+  }
+  ctx2d.strokeStyle = "rgba(255,255,255,0.05)";
+  ctx2d.lineWidth = 1;
+  for(let i=0;i<=n;i++){
+    ctx2d.beginPath(); ctx2d.moveTo(0, i*cell); ctx2d.lineTo(n*cell, i*cell); ctx2d.stroke();
+    ctx2d.beginPath(); ctx2d.moveTo(i*cell, 0); ctx2d.lineTo(i*cell, n*cell); ctx2d.stroke();
+  }
+}
+
+function neighbourhoodMean(cx, cy, win, anis, angle, squareShape){
+  let sum=0, wsum=0;
+  const rad = Math.floor(win/2);
+  for(let y=cy-rad-3*n; y<=cy+rad+3*n; y++){
+    for(let x=cx-rad-3*n; x<=cx+rad+3*n; x++){
+      const xi = (x % n + n) % n;
+      const yi = (y % n + n) % n;
+      const dx = x - cx;
+      const dy = y - cy;
+      let inside=false;
+      if(squareShape){
+        inside = Math.abs(dx) <= rad && Math.abs(dy) <= rad;
+      }else{
+        inside = inEllipse(dx, dy, rad*anis, rad/anis, angle);
+      }
+      if(inside){
+        const w = 1;
+        sum += field[yi*n+xi]*w; wsum += w;
+      }
+    }
+  }
+  return {mean: wsum>0? sum/wsum : NaN};
+}
+
+function recomputeMaps(){
+  mapNeighbourData = new Float32Array(n*n);
+  mapHaloData = new Float32Array(n*n);
+  for(let y=0;y<n;y++){
+    for(let x=0;x<n;x++){
+      const m1 = neighbourhoodMean(x, y, win, anis, angle, squareShape).mean;
+      let m2 = NaN;
+      if(halo>0){
+        m2 = neighbourhoodMean(x, y, win+halo, anis, angle, squareShape).mean;
+      }
+      mapNeighbourData[y*n+x] = Number.isFinite(m1) ? m1 : 0;
+      mapHaloData[y*n+x] = Number.isFinite(m2) ? m2 : 0;
+    }
+  }
+}
+
+canvas.addEventListener('mousemove', (e)=>{
+  if(auto) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const cell = Math.floor(Math.min(canvas.width,canvas.height)/n);
+  mouse.x = clamp(Math.floor(x/cell), 0, n-1);
+  mouse.y = clamp(n-1 - Math.floor(y/cell), 0, n-1);
+  drawBase();
+});
+
+document.getElementById('autoBtn').addEventListener('click', ()=>{
+  auto = !auto;
+  document.getElementById('autoBtn').textContent = auto ? "⏸ Pause" : "▶ Auto-scan";
+});
+
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  mouse.x = Math.floor(n/2); mouse.y = Math.floor(n/2);
+  angle = 0; anis = 1; win = 7; halo = 3; squareShape = true;
+  document.getElementById('win').value = win;
+  document.getElementById('anis').value = anis;
+  document.getElementById('angle').value = 0;
+  document.getElementById('halo').value = halo;
+  document.getElementById('shapeBtn').textContent = "Shape: Square";
+  updateLabels();
+  recomputeMaps();
+  drawAll();
+});
+
+document.getElementById('shapeBtn').addEventListener('click', ()=>{
+  squareShape = !squareShape;
+  document.getElementById('shapeBtn').textContent = "Shape: " + (squareShape? "Square" : "Ellipse");
+  recomputeMaps();
+  drawAll();
+});
+
+document.getElementById('noiseBtn').addEventListener('click', ()=>{
+  seed = (seed % 997)+1;
+  field = makeField(n, seed);
+  recomputeMaps();
+  drawAll();
+});
+
+function updateLabels(){
+  document.getElementById('gridSizeVal').textContent = n;
+  document.getElementById('winVal').textContent = win;
+  document.getElementById('anisVal').textContent = Number(anis).toFixed(1);
+  document.getElementById('angleVal').textContent = Math.round(angle*180/Math.PI) + "°";
+  document.getElementById('haloVal').textContent = "+"+halo;
+}
+['gridSize','win','anis','angle','halo'].forEach(id=>{
+  document.getElementById(id).addEventListener('input', (e)=>{
+    if(id==='gridSize'){ n = parseInt(e.target.value); field = makeField(n, seed); makePath(); }
+    if(id==='win'){ win = parseInt(e.target.value); makePath(); }
+    if(id==='anis'){ anis = parseFloat(e.target.value); }
+    if(id==='angle'){ angle = parseFloat(e.target.value)*Math.PI/180; }
+    if(id==='halo'){ halo = parseInt(e.target.value); }
+    updateLabels();
+    recomputeMaps();
+    drawAll();
+  });
+});
+
+function drawAll(){
+  drawBase();
+  if(!mapNeighbourData || !mapHaloData) recomputeMaps();
+  drawMap(mapN, mapNeighbourData);
+  drawMap(mapH, mapHaloData);
+}
+
+function tick(){
+  if(auto && path.length){
+    const step = Math.max(1, Math.floor(win/2));
+    const [x,y] = path[autoIndex % path.length];
+    mouse.x = x; mouse.y = y;
+    autoIndex++;
+  }
+  drawBase();
+  requestAnimationFrame(tick);
+}
+
+function init(){
+  drawColorbar();
+  updateLabels();
+  recomputeMaps();
+  drawAll();
+  tick();
+}
+init();
+</script>
+</body>
+</html>
